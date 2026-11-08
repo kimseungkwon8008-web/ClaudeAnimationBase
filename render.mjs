@@ -14,9 +14,9 @@
 //   Standalone loops (LOOPS in the page): add --loop=<name> to any of the above (times are then loop times), or
 //     node render.mjs --loop=emotions --png --out=out/loop_emotions                          one cycle as PNGs (for GIFs)
 //   Music: --audio=assets/song.mp3 (or PROJECT.audio) is muxed into --clip and --encode. Other flags: --fps=24,
-//   --chrome=<path to Chrome/Chromium>.
+//   --chrome=<path to Chrome/Chromium>, --ffmpeg=<path to ffmpeg> (or FFMPEG_PATH; default: ffmpeg on PATH).
 import puppeteer from 'puppeteer-core';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -28,13 +28,20 @@ const CHROMES = [args.chrome, process.env.CHROME_PATH, 'C:/Program Files/Google/
   ...playwrightChromes()];
 // Chromium builds Playwright downloaded (~/.cache/ms-playwright/chromium-NNNN), newest first
 function playwrightChromes() {
-  const dir = `${homedir()}/.cache/ms-playwright`;
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir).filter(n => /^chromium-\d+$/.test(n)).sort((a, b) => b.split('-')[1] - a.split('-')[1])
-    .map(n => `${dir}/${n}/chrome-linux64/chrome`);
+  return [process.env.PLAYWRIGHT_BROWSERS_PATH, `${homedir()}/.cache/ms-playwright`].filter(d => d && existsSync(d)).flatMap(dir => readdirSync(dir).filter(n => /^chromium-\d+$/.test(n)).sort((a, b) => b.split('-')[1] - a.split('-')[1])
+    .map(n => `${dir}/${n}/chrome-linux64/chrome`));
 }
 const CHROME = CHROMES.find(p => p && existsSync(p));
 if (!CHROME) { console.error('Chrome not found: pass --chrome=<path> or set CHROME_PATH'); process.exit(1); }
+// ffmpeg: --ffmpeg=<path>, FFMPEG_PATH, common install spots, then whatever `ffmpeg` resolves to on PATH
+const FFMPEG = [args.ffmpeg, process.env.FFMPEG_PATH, 'C:/ffmpeg/bin/ffmpeg.exe', '/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg']
+  .find(p => p && p !== true && existsSync(p)) || 'ffmpeg';
+function needFfmpeg() {
+  const r = spawnSync(FFMPEG, ['-hide_banner', '-version'], { encoding: 'utf8' });
+  if (r.error || r.status !== 0) { console.error(`ffmpeg not found (${FFMPEG}): install it, or pass --ffmpeg=<path> / set FFMPEG_PATH`); process.exit(1); }
+  console.log('ffmpeg: ' + FFMPEG + ' (' + r.stdout.split('\n')[0].replace(/ Copyright.*/, '') + ')');
+}
+if (args.encode || args.clip) needFfmpeg();
 const fps = +(args.fps || 24), FRAMES_DIR = 'out/frames';
 const run = (cmd, a) => new Promise((ok, bad) => { const p = spawn(cmd, a, { stdio: 'inherit' }); p.on('close', c => c ? bad(new Error(cmd + ' exited ' + c)) : ok()); });
 const times = s => String(s).split(',').map(Number);
@@ -45,7 +52,7 @@ const fields = s => { const out = []; let d = 0, cur = ''; for (const ch of Stri
 if (args.encode) {
   const out = args.out || 'out/video.mp4', n = readdirSync(FRAMES_DIR).filter(f => f.endsWith('.jpg')).length, audio = args.audio;
   console.log(`encoding ${n} frames → ${out}${audio ? ' with ' + audio : ''}`);
-  await run('ffmpeg', ['-y', '-loglevel', 'error', '-stats', '-framerate', String(fps), '-i', `${FRAMES_DIR}/f%05d.jpg`,
+  await run(FFMPEG, ['-y', '-loglevel', 'error', '-stats', '-framerate', String(fps), '-i', `${FRAMES_DIR}/f%05d.jpg`,
     ...(audio ? ['-i', audio, '-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-b:a', '192k', '-shortest'] : []),
     '-c:v', 'libx264', '-preset', 'slow', '-crf', '17', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', out]);
   console.log('wrote ' + out);
@@ -139,7 +146,7 @@ if (args.sheet || args.strip) {
   const [a, b] = args.range ? span(args.range) : typeof args.clip === 'string' ? span(args.clip) : [0, len];
   const audio = args.audio || await page.evaluate(() => PROJECT.audio || '');
   const out = args.out || 'out/clip.mp4'; mkdirSync(dirname(out), { recursive: true });
-  const ff = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'mjpeg', '-i', '-',
+  const ff = spawn(FFMPEG, ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'mjpeg', '-i', '-',
     ...(audio ? ['-ss', String(a), '-t', String(b - a), '-i', audio, '-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-b:a', '192k', '-shortest'] : []),
     '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', out],
     { stdio: ['pipe', 'inherit', 'inherit'] });
